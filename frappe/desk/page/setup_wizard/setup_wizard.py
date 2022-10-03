@@ -2,11 +2,10 @@
 # License: MIT. See LICENSE
 
 import json
-import os
 
 import frappe
 from frappe.geo.country_info import get_country_info
-from frappe.translate import get_dict, send_translations, set_default_language
+from frappe.translate import get_messages_for_boot, send_translations, set_default_language
 from frappe.utils import cint, strip
 from frappe.utils.password import update_password
 
@@ -290,15 +289,7 @@ def load_messages(language):
 	frappe.clear_cache()
 	set_default_language(get_language_code(language))
 	frappe.db.commit()
-	m = get_dict("page", "setup-wizard")
-
-	for path in frappe.get_hooks("setup_wizard_requires"):
-		# common folder `assets` served from `sites/`
-		js_file_path = os.path.abspath(frappe.get_site_path("..", *path.strip("/").split("/")))
-		m.update(get_dict("jsfile", js_file_path))
-
-	m.update(get_dict("boot"))
-	send_translations(m)
+	send_translations(get_messages_for_boot())
 	return frappe.local.lang
 
 
@@ -339,11 +330,11 @@ def prettify_args(args):
 		if isinstance(val, str) and "data:image" in val:
 			filename = val.split("data:image", 1)[0].strip(", ")
 			size = round((len(val) * 3 / 4) / 1048576.0, 2)
-			args[key] = "Image Attached: '{0}' of size {1} MB".format(filename, size)
+			args[key] = f"Image Attached: '{filename}' of size {size} MB"
 
 	pretty_args = []
 	for key in sorted(args):
-		pretty_args.append("{} = {}".format(key, args[key]))
+		pretty_args.append(f"{key} = {args[key]}")
 	return pretty_args
 
 
@@ -386,7 +377,7 @@ def email_setup_wizard_exception(traceback, args):
 	frappe.sendmail(
 		recipients=frappe.conf.setup_wizard_exception_email,
 		sender=frappe.session.user,
-		subject="Setup failed: {}".format(frappe.local.site),
+		subject=f"Setup failed: {frappe.local.site}",
 		message=message,
 		delayed=False,
 	)

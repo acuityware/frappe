@@ -9,12 +9,18 @@ import os
 import re
 import sys
 import traceback
-import typing
-from collections.abc import MutableMapping, MutableSequence, Sequence
+from collections.abc import (
+	Container,
+	Generator,
+	Iterable,
+	MutableMapping,
+	MutableSequence,
+	Sequence,
+)
 from email.header import decode_header, make_header
 from email.utils import formataddr, parseaddr
 from gzip import GzipFile
-from typing import Generator, Iterable
+from typing import Any, Literal
 from urllib.parse import quote, urlparse
 
 from redis.exceptions import ConnectionError
@@ -26,6 +32,16 @@ import frappe
 # utility functions like cint, int, flt, etc.
 from frappe.utils.data import *
 from frappe.utils.html_utils import sanitize_html
+
+EMAIL_NAME_PATTERN = re.compile(r"[^A-Za-z0-9\u00C0-\u024F\/\_\' ]+")
+EMAIL_STRING_PATTERN = re.compile(r"([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)")
+NON_MD_HTML_PATTERN = re.compile(r"<p[\s]*>|<br[\s]*>")
+HTML_TAGS_PATTERN = re.compile(r"\<[^>]*\>")
+INCLUDE_DIRECTIVE_PATTERN = re.compile("""({% include ['"]([^'"]*)['"] %})""")
+PHONE_NUMBER_PATTERN = re.compile(r"([0-9\ \+\_\-\,\.\*\#\(\)]){1,20}$")
+PERSON_NAME_PATTERN = re.compile(r"^[\w][\w\'\-]*( \w[\w\'\-]*)*$")
+WHITESPACE_PATTERN = re.compile(r"[\t\n\r]")
+MULTI_EMAIL_STRING_PATTERN = re.compile(r'[,\n](?=(?:[^"]|"[^"]*")*$)')
 
 
 def get_fullname(user=None):
@@ -77,13 +93,10 @@ def get_formatted_email(user, mail=None):
 
 def extract_email_id(email):
 	"""fetch only the email part of the Email Address"""
-	email_id = parse_addr(email)[1]
-	if email_id and isinstance(email_id, str) and not isinstance(email_id, str):
-		email_id = email_id.decode("utf-8", "ignore")
-	return email_id
+	return cstr(parse_addr(email)[1])
 
 
-def validate_phone_number_with_country_code(phone_number, fieldname):
+def validate_phone_number_with_country_code(phone_number: str, fieldname: str) -> None:
 	from phonenumbers import NumberParseException, is_valid_number, parse
 
 	from frappe import _
@@ -116,7 +129,7 @@ def validate_phone_number(phone_number, throw=False):
 		return False
 
 	phone_number = phone_number.strip()
-	match = re.match(r"([0-9\ \+\_\-\,\.\*\#\(\)]){1,20}$", phone_number)
+	match = PHONE_NUMBER_PATTERN.match(phone_number)
 
 	if not match and throw:
 		frappe.throw(
@@ -130,12 +143,14 @@ def validate_name(name, throw=False):
 	"""Returns True if the name is valid
 	valid names may have unicode and ascii characters, dash, quotes, numbers
 	anything else is considered invalid
+
+	Note: "Name" here is name of a person, not the primary key in Frappe doctypes.
 	"""
 	if not name:
 		return False
 
 	name = name.strip()
-	match = re.match(r"^[\w][\w\'\-]*( \w[\w\'\-]*)*$", name)
+	match = PERSON_NAME_PATTERN.match(name)
 
 	if not match and throw:
 		frappe.throw(frappe._("{0} is not a valid Name").format(name), frappe.InvalidNameError)
@@ -201,8 +216,8 @@ def split_emails(txt):
 	email_list = []
 
 	# emails can be separated by comma or newline
-	s = re.sub(r"[\t\n\r]", " ", cstr(txt))
-	for email in re.split(r'[,\n](?=(?:[^"]|"[^"]*")*$)', s):
+	s = WHITESPACE_PATTERN.sub(" ", cstr(txt))
+	for email in MULTI_EMAIL_STRING_PATTERN.split(s):
 		email = strip(cstr(email))
 		if email:
 			email_list.append(email)
@@ -210,7 +225,11 @@ def split_emails(txt):
 	return email_list
 
 
-def validate_url(txt, throw=False, valid_schemes=None):
+def validate_url(
+	txt: str,
+	throw: bool = False,
+	valid_schemes: str | Container[str] | None = None,
+) -> bool:
 	"""
 	Checks whether `txt` has a valid URL string
 
@@ -236,7 +255,7 @@ def validate_url(txt, throw=False, valid_schemes=None):
 	return is_valid
 
 
-def random_string(length):
+def random_string(length: int) -> str:
 	"""generate a random string"""
 	import string
 	from random import choice
@@ -244,7 +263,7 @@ def random_string(length):
 	return "".join(choice(string.ascii_letters + string.digits) for i in range(length))
 
 
-def has_gravatar(email):
+def has_gravatar(email: str) -> str:
 	"""Returns gravatar url if user has set an avatar at gravatar.com"""
 	import requests
 
@@ -253,9 +272,7 @@ def has_gravatar(email):
 		# since querying gravatar for every item will be slow
 		return ""
 
-	hexdigest = hashlib.md5(frappe.as_unicode(email).encode("utf-8")).hexdigest()
-
-	gravatar_url = "https://secure.gravatar.com/avatar/{hash}?d=404&s=200".format(hash=hexdigest)
+	gravatar_url = get_gravatar_url(email, "404")
 	try:
 		res = requests.get(gravatar_url)
 		if res.status_code == 200:
@@ -266,21 +283,15 @@ def has_gravatar(email):
 		return ""
 
 
-def get_gravatar_url(email):
-	return "https://secure.gravatar.com/avatar/{hash}?d=mm&s=200".format(
-		hash=hashlib.md5(email.encode("utf-8")).hexdigest()
-	)
+def get_gravatar_url(email: str, default: Literal["mm", "404"] = "mm") -> str:
+	hexdigest = hashlib.md5(frappe.as_unicode(email).encode("utf-8")).hexdigest()
+	return f"https://secure.gravatar.com/avatar/{hexdigest}?d={default}&s=200"
 
 
-def get_gravatar(email):
+def get_gravatar(email: str) -> str:
 	from frappe.utils.identicon import Identicon
 
-	gravatar_url = has_gravatar(email)
-
-	if not gravatar_url:
-		gravatar_url = Identicon(email).base64()
-
-	return gravatar_url
+	return has_gravatar(email) or Identicon(email).base64()
 
 
 def get_traceback(with_context=False) -> str:
@@ -307,7 +318,7 @@ def log(event, details):
 	frappe.logger(event).info(details)
 
 
-def dict_to_str(args, sep="&"):
+def dict_to_str(args: dict[str, Any], sep: str = "&") -> str:
 	"""
 	Converts a dictionary to URL
 	"""
@@ -343,24 +354,19 @@ def set_default(key, val):
 	return frappe.db.set_default(key, val)
 
 
-def remove_blanks(d):
+def remove_blanks(d: dict) -> dict:
 	"""
-	Returns d with empty ('' or None) values stripped
+	Returns d with empty ('' or None) values stripped. Mutates inplace.
 	"""
-	empty_keys = []
-	for key in d:
-		if d[key] == "" or d[key] is None:
-			# del d[key] raises runtime exception, using a workaround
-			empty_keys.append(key)
-	for key in empty_keys:
-		del d[key]
-
+	for k, v in tuple(d.items()):
+		if v == "" or v == None:
+			del d[k]
 	return d
 
 
 def strip_html_tags(text):
 	"""Remove html tags from text"""
-	return re.sub(r"\<[^>]*\>", "", text)
+	return HTML_TAGS_PATTERN.sub("", text)
 
 
 def get_file_timestamp(fn):
@@ -409,32 +415,36 @@ def unesc(s, esc_chars):
 	return s
 
 
-def execute_in_shell(cmd, verbose=0, low_priority=False):
+def execute_in_shell(cmd, verbose=False, low_priority=False, check_exit_code=False):
 	# using Popen instead of os.system - as recommended by python docs
 	import tempfile
 	from subprocess import Popen
 
-	with tempfile.TemporaryFile() as stdout:
-		with tempfile.TemporaryFile() as stderr:
-			kwargs = {"shell": True, "stdout": stdout, "stderr": stderr}
+	with (tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr):
+		kwargs = {"shell": True, "stdout": stdout, "stderr": stderr}
 
-			if low_priority:
-				kwargs["preexec_fn"] = lambda: os.nice(10)
+		if low_priority:
+			kwargs["preexec_fn"] = lambda: os.nice(10)
 
-			p = Popen(cmd, **kwargs)
-			p.wait()
+		p = Popen(cmd, **kwargs)
+		exit_code = p.wait()
 
-			stdout.seek(0)
-			out = stdout.read()
+		stdout.seek(0)
+		out = stdout.read()
 
-			stderr.seek(0)
-			err = stderr.read()
+		stderr.seek(0)
+		err = stderr.read()
 
-	if verbose:
+	failed = check_exit_code and exit_code
+
+	if verbose or failed:
 		if err:
 			print(err)
 		if out:
 			print(out)
+
+	if failed:
+		raise Exception("Command failed")
 
 	return err, out
 
@@ -451,7 +461,7 @@ def get_site_base_path():
 
 
 def get_site_path(*path):
-	return get_path(base=get_site_base_path(), *path)
+	return get_path(*path, base=get_site_base_path())
 
 
 def get_files_path(*path, **kwargs):
@@ -479,7 +489,7 @@ def get_request_site_address(full_address=False):
 
 
 def get_site_url(site):
-	return "http://{site}:{port}".format(site=site, port=frappe.get_conf(site).webserver_port)
+	return f"http://{site}:{frappe.get_conf(site).webserver_port}"
 
 
 def encode_dict(d, encoding="utf-8"):
@@ -497,7 +507,7 @@ def decode_dict(d, encoding="utf-8"):
 	return d
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def get_site_name(hostname):
 	return hostname.split(":")[0]
 
@@ -507,7 +517,7 @@ def get_disk_usage():
 	files_path = get_files_path()
 	if not os.path.exists(files_path):
 		return 0
-	err, out = execute_in_shell("du -hsm {files_path}".format(files_path=files_path))
+	err, out = execute_in_shell(f"du -hsm {files_path}")
 	return cint(out.split("\n")[-2].split("\t")[0])
 
 
@@ -517,11 +527,11 @@ def touch_file(path):
 	return path
 
 
-def get_test_client() -> Client:
+def get_test_client(use_cookies=True) -> Client:
 	"""Returns an test instance of the Frappe WSGI"""
 	from frappe.app import application
 
-	return Client(application)
+	return Client(application, use_cookies=use_cookies)
 
 
 def get_hook_method(hook_name, fallback=None):
@@ -547,11 +557,11 @@ def is_cli() -> bool:
 	try:
 		invoked_from_terminal = bool(os.get_terminal_size())
 	except Exception:
-		invoked_from_terminal = sys.stdin.isatty()
+		invoked_from_terminal = sys.stdin and sys.stdin.isatty()
 	return invoked_from_terminal
 
 
-def update_progress_bar(txt, i, l):
+def update_progress_bar(txt, i, l, absolute=False):
 	if os.environ.get("CI"):
 		if i == 0:
 			sys.stdout.write(txt)
@@ -560,7 +570,7 @@ def update_progress_bar(txt, i, l):
 		sys.stdout.flush()
 		return
 
-	if not getattr(frappe.local, "request", None) or is_cli():
+	if not getattr(frappe.local, "request", None) or is_cli():  # pragma: no cover
 		lt = len(txt)
 		try:
 			col = 40 if os.get_terminal_size().columns > 80 else 20
@@ -573,22 +583,23 @@ def update_progress_bar(txt, i, l):
 
 		complete = int(float(i + 1) / l * col)
 		completion_bar = ("=" * complete).ljust(col, " ")
-		percent_complete = str(int(float(i + 1) / l * 100))
-		sys.stdout.write("\r{0}: [{1}] {2}%".format(txt, completion_bar, percent_complete))
+		percent_complete = f"{str(int(float(i + 1) / l * 100))}%"
+		status = f"{i} of {l}" if absolute else percent_complete
+		sys.stdout.write(f"\r{txt}: [{completion_bar}] {status}")
 		sys.stdout.flush()
 
 
 def get_html_format(print_path):
 	html_format = None
 	if os.path.exists(print_path):
-		with open(print_path, "r") as f:
+		with open(print_path) as f:
 			html_format = f.read()
 
-		for include_directive, path in re.findall("""({% include ['"]([^'"]*)['"] %})""", html_format):
+		for include_directive, path in INCLUDE_DIRECTIVE_PATTERN.findall(html_format):
 			for app_name in frappe.get_installed_apps():
 				include_path = frappe.get_app_path(app_name, *path.split(os.path.sep))
 				if os.path.exists(include_path):
-					with open(include_path, "r") as f:
+					with open(include_path) as f:
 						html_format = html_format.replace(include_directive, f.read())
 					break
 
@@ -601,7 +612,7 @@ def is_markdown(text):
 	elif "<!-- html -->" in text:
 		return False
 	else:
-		return not re.search(r"<p[\s]*>|<br[\s]*>", text)
+		return not NON_MD_HTML_PATTERN.search(text)
 
 
 def get_sites(sites_path=None):
@@ -625,12 +636,10 @@ def get_sites(sites_path=None):
 
 def get_request_session(max_retries=5):
 	import requests
-	from urllib3.util import Retry
+	from requests.adapters import HTTPAdapter, Retry
 
 	session = requests.Session()
-	http_adapter = requests.adapters.HTTPAdapter(
-		max_retries=Retry(total=max_retries, status_forcelist=[500])
-	)
+	http_adapter = HTTPAdapter(max_retries=Retry(total=max_retries, status_forcelist=[500]))
 
 	session.mount("http://", http_adapter)
 	session.mount("https://", http_adapter)
@@ -670,8 +679,7 @@ def parse_addr(email_string):
 		name = get_name_from_email_string(email_string, email, name)
 		return (name, email)
 	else:
-		email_regex = re.compile(r"([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)")
-		email_list = re.findall(email_regex, email_string)
+		email_list = EMAIL_STRING_PATTERN.findall(email_string)
 		if len(email_list) > 0 and check_format(email_list[0]):
 			# take only first email address
 			email = email_list[0]
@@ -698,7 +706,7 @@ def check_format(email_id):
 
 def get_name_from_email_string(email_string, email_id, name):
 	name = email_string.replace(email_id, "")
-	name = re.sub(r"[^A-Za-z0-9\u00C0-\u024F\/\_\' ]+", "", name).strip()
+	name = EMAIL_NAME_PATTERN.sub("", name).strip()
 	if not name:
 		name = email_id
 	return name
@@ -743,7 +751,7 @@ def get_site_info():
 
 	kwargs = {
 		"fields": ["user", "creation", "full_name"],
-		"filters": {"Operation": "Login", "Status": "Success"},
+		"filters": {"operation": "Login", "status": "Success"},
 		"limit": "10",
 	}
 
@@ -895,10 +903,10 @@ def get_file_size(path, format=False):
 
 	for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"]:
 		if abs(num) < 1024:
-			return "{0:3.1f}{1}{2}".format(num, unit, suffix)
+			return f"{num:3.1f}{unit}{suffix}"
 		num /= 1024
 
-	return "{0:.1f}{1}{2}".format(num, "Yi", suffix)
+	return "{:.1f}{}{}".format(num, "Yi", suffix)
 
 
 def get_build_version():
@@ -953,13 +961,13 @@ def get_bench_relative_path(file_path):
 	file_path = os.path.join(base_path, file_path)
 
 	if not os.path.exists(file_path):
-		print("Invalid path {0}".format(file_path[3:]))
+		print(f"Invalid path {file_path[3:]}")
 		sys.exit(1)
 
 	return os.path.abspath(file_path)
 
 
-def groupby_metric(iterable: typing.Dict[str, list], key: str):
+def groupby_metric(iterable: dict[str, list], key: str):
 	"""Group records by a metric.
 
 	Usecase: Lets assume we got country wise players list with the ranking given for each player(multiple players in a country can have same ranking aswell).

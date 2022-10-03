@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2018, Frappe Technologies and contributors
 # License: MIT. See LICENSE
 
@@ -9,6 +8,7 @@ import frappe
 from frappe.desk.form.load import get_attachments
 from frappe.desk.query_report import generate_report_result
 from frappe.model.document import Document
+from frappe.monitor import add_data_to_monitor
 from frappe.utils import gzip_compress, gzip_decompress
 from frappe.utils.background_jobs import enqueue
 
@@ -25,6 +25,8 @@ class PreparedReport(Document):
 def run_background(prepared_report):
 	instance = frappe.get_doc("Prepared Report", prepared_report)
 	report = frappe.get_doc("Report", instance.ref_report_doctype)
+
+	add_data_to_monitor(report=instance.ref_report_doctype)
 
 	try:
 		report.custom_columns = []
@@ -103,7 +105,7 @@ def delete_prepared_reports(reports):
 def create_json_gz_file(data, dt, dn):
 	# Storing data in CSV file causes information loss
 	# Reports like P&L Statement were completely unsuable because of this
-	json_filename = "{0}.json.gz".format(
+	json_filename = "{}.json.gz".format(
 		frappe.utils.data.format_datetime(frappe.utils.now(), "Y-m-d-H:M")
 	)
 	encoded_content = frappe.safe_encode(frappe.as_json(data))

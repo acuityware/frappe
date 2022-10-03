@@ -461,7 +461,7 @@ class TestPermissions(FrappeTestCase):
 			self.assertIn(
 				post.blogger,
 				["_Test Blogger", "_Test Blogger 1"],
-				"A post from {} is not expected.".format(post.blogger),
+				f"A post from {post.blogger} is not expected.",
 			)
 
 	def test_if_owner_permission_overrides_properly(self):
@@ -649,26 +649,55 @@ class TestPermissions(FrappeTestCase):
 		# reset the user
 		frappe.set_user(current_user)
 
-	def test_child_table_permissions(self):
-		frappe.set_user("test@example.com")
-		self.assertIsInstance(frappe.get_list("Has Role", parent_doctype="User", limit=1), list)
-		self.assertRaisesRegex(
-			frappe.exceptions.ValidationError,
-			".* is not a valid parent DocType for .*",
-			frappe.get_list,
-			doctype="Has Role",
-			parent_doctype="ToDo",
+	def test_child_permissions(self):
+		frappe.set_user("test3@example.com")
+		self.assertIsInstance(frappe.get_list("DefaultValue", parent_doctype="User", limit=1), list)
+
+		# frappe.get_list
+		self.assertRaises(frappe.PermissionError, frappe.get_list, "DefaultValue")
+		self.assertRaises(frappe.PermissionError, frappe.get_list, "DefaultValue", parent_doctype="ToDo")
+		self.assertRaises(
+			frappe.PermissionError, frappe.get_list, "DefaultValue", parent_doctype="DefaultValue"
 		)
-		self.assertRaisesRegex(
-			frappe.exceptions.ValidationError,
-			"Please specify a valid parent DocType for .*",
-			frappe.get_list,
-			"Has Role",
-		)
-		self.assertRaisesRegex(
-			frappe.exceptions.ValidationError,
-			".* is not a valid parent DocType for .*",
-			frappe.get_list,
-			doctype="Has Role",
-			parent_doctype="Has Role",
-		)
+
+		# frappe.get_doc
+		user = frappe.get_doc("User", frappe.session.user)
+		doc = user.append("defaults")
+		doc.check_permission()
+
+		# false by permlevel
+		doc = user.append("roles")
+		self.assertRaises(frappe.PermissionError, doc.check_permission)
+
+		# false by user permission
+		user = frappe.get_doc("User", "Administrator")
+		doc = user.append("defaults")
+		self.assertRaises(frappe.PermissionError, doc.check_permission)
+
+	def test_select_user(self):
+		"""If test3@example.com is restricted by a User Permission to see only
+		users linked to a certain doctype (in this case: Gender "Female"), he
+		should not be able to query other users (Gender "Male").
+		"""
+		# ensure required genders exist
+		for gender in ("Male", "Female"):
+			if frappe.db.exists("Gender", gender):
+				continue
+
+			frappe.get_doc({"doctype": "Gender", "gender": gender}).insert()
+
+		# asssign gender to test users
+		frappe.db.set_value("User", "test1@example.com", "gender", "Male")
+		frappe.db.set_value("User", "test2@example.com", "gender", "Female")
+		frappe.db.set_value("User", "test3@example.com", "gender", "Female")
+
+		# restrict test3@example.com to see only female users
+		add_user_permission("Gender", "Female", "test3@example.com")
+
+		# become user test3@example.com and see what users he can query
+		frappe.set_user("test3@example.com")
+		users = frappe.get_list("User", pluck="name")
+
+		self.assertNotIn("test1@example.com", users)
+		self.assertIn("test2@example.com", users)
+		self.assertIn("test3@example.com", users)

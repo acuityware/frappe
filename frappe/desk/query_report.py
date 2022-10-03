@@ -1,6 +1,7 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
 
+import datetime
 import json
 import os
 from datetime import timedelta
@@ -11,6 +12,7 @@ from frappe import _
 from frappe.core.utils import ljust_list
 from frappe.model.utils import render_include
 from frappe.modules import get_module_path, scrub
+from frappe.monitor import add_data_to_monitor
 from frappe.permissions import get_role_permissions
 from frappe.translate import send_translations
 from frappe.utils import (
@@ -187,7 +189,7 @@ def get_script(report_name):
 
 	script = None
 	if os.path.exists(script_path):
-		with open(script_path, "r") as f:
+		with open(script_path) as f:
 			script = f.read()
 			script += f"\n\n//# sourceURL={scrub(report.name)}.js"
 
@@ -250,6 +252,7 @@ def run(
 		result = get_prepared_report_result(report, filters, dn, user)
 	else:
 		result = generate_report_result(report, filters, user, custom_columns, is_tree, parent_field)
+		add_data_to_monitor(report=report.reference_report or report.name)
 
 	result["add_total_row"] = report.add_total_row and not result.get("skip_total_row", False)
 
@@ -384,6 +387,18 @@ def format_duration_fields(data: frappe._dict) -> None:
 
 
 def build_xlsx_data(data, visible_idx, include_indentation, ignore_visible_idx=False):
+	EXCEL_TYPES = (
+		str,
+		bool,
+		type(None),
+		int,
+		float,
+		datetime.datetime,
+		datetime.date,
+		datetime.time,
+		datetime.timedelta,
+	)
+
 	result = [[]]
 	column_widths = []
 
@@ -408,6 +423,9 @@ def build_xlsx_data(data, visible_idx, include_indentation, ignore_visible_idx=F
 					label = column.get("label")
 					fieldname = column.get("fieldname")
 					cell_value = row.get(fieldname, row.get(label, ""))
+					if not isinstance(cell_value, EXCEL_TYPES):
+						cell_value = cstr(cell_value)
+
 					if cint(include_indentation) and "indent" in row and col_idx == 0:
 						cell_value = ("    " * cint(row["indent"])) + cstr(cell_value)
 					row_data.append(cell_value)

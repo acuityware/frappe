@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2017, Frappe Technologies and contributors
 # License: MIT. See LICENSE
 
@@ -14,7 +13,7 @@ from frappe.utils.weasyprint import download_pdf, get_html
 
 class PrintFormat(Document):
 	def onload(self):
-		templates = frappe.db.get_all(
+		templates = frappe.get_all(
 			"Print Format Field Template",
 			fields=["template", "field", "name"],
 			filters={"document_type": self.doc_type},
@@ -56,7 +55,7 @@ class PrintFormat(Document):
 			frappe.throw(_("{0} is required").format(frappe.bold(_("HTML"))), frappe.MandatoryError)
 
 	def extract_images(self):
-		from frappe.core.doctype.file.file import extract_images_from_html
+		from frappe.core.doctype.file.utils import extract_images_from_html
 
 		if self.print_format_builder_beta:
 			return
@@ -96,7 +95,7 @@ class PrintFormat(Document):
 	def export_doc(self):
 		from frappe.modules.utils import export_module_json
 
-		export_module_json(self, self.standard == "Yes", self.module)
+		return export_module_json(self, self.standard == "Yes", self.module)
 
 	def on_trash(self):
 		if self.doc_type:
